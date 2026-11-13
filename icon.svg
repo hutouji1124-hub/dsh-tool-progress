@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tool call progress">
+  <rect x="6" y="26" width="52" height="12" rx="6" fill="#d8dde6"/>
+  <rect x="6" y="26" width="34" height="12" rx="6" fill="#247bbf"/>
+  <circle cx="47" cy="46" r="5" fill="#247bbf"/>
+  <circle cx="17" cy="18" r="5" fill="#247bbf" opacity="0.55"/>
+  <circle cx="32" cy="18" r="5" fill="#247bbf" opacity="0.85"/>
+</svg>

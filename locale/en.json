@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tool call progress",
+    "description": "Below the composer, a live line about the tool call in flight: which tool, what it is for, how long it has been running, whether it settled cleanly or failed."
+  }
+}

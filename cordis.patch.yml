@@ -1,0 +1,5 @@
+# dsh-tool-progress —— 把「正在调用工具」这条灰字变成一条能看懂的进度条。
+# Host 半端只提供清单条目；渲染全部由 client.js 在浏览器里完成。
+- insert:
+    - id: tool-progress
+      name: dsh-tool-progress
