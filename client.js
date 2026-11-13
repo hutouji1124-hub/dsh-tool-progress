@@ -23,6 +23,11 @@ window.__ModuleLoader__.load({
     const DICT = {
       zh: {
         thinking: '正在思考',
+        turnRunning: '进行中 · 第 {n} 次调用',
+        turnRunningThinking: '进行中 · 正在思考',
+        turnDone: '已完成 · {n} 次调用',
+        turnStillRunning: '回合进行中',
+        noCalls: '尚未调用工具，模型正在生成',
         preparing: '生成参数',
         running: '执行中',
         returned: '已返回',
@@ -49,6 +54,11 @@ window.__ModuleLoader__.load({
       },
       en: {
         thinking: 'Thinking',
+        turnRunning: 'Running · call {n}',
+        turnRunningThinking: 'Running · thinking',
+        turnDone: 'Done · {n} calls',
+        turnStillRunning: 'turn still running',
+        noCalls: 'no tool call yet — the model is writing',
         preparing: 'Preparing',
         running: 'Running',
         returned: 'Returned',
@@ -74,16 +84,32 @@ window.__ModuleLoader__.load({
         justDone: 'Done'
       }
     };
-    const LANG = (() => {
-      const raw = (typeof navigator !== 'undefined' && (navigator.language || (navigator.languages || [])[0])) || 'zh';
-      return String(raw).toLowerCase().startsWith('zh') ? 'zh' : 'en';
-    })();
-    const TEXT = DICT[LANG];
-    const t = (key, vars) => {
-      const template = TEXT[key] ?? DICT.zh[key] ?? key;
+    /**
+     * 语言解析顺序：Harness 自己的 locale（ctx.locale）→ navigator → zh。
+     *
+     * 踩过的坑：初版只看 navigator.language，而 DSH Desktop 的渲染进程以
+     * --lang=en-US 启动，拿到的永远是英文，界面明明在中文语境里却显示
+     * "Thinking" / "Done"。语言必须由宿主说了算，不能猜浏览器。
+     */
+    function langOf(id) {
+      const value = String(id || '').toLowerCase();
+      if (value === '') return '';
+      if (value.startsWith('zh')) return 'zh';
+      if (value.startsWith('en')) return 'en';
+      return '';
+    }
+
+    function navigatorLang() {
+      const raw = (typeof navigator !== 'undefined' && (navigator.language || (navigator.languages || [])[0])) || '';
+      return langOf(raw) || 'zh';
+    }
+
+    function translate(lang, key, vars) {
+      const table = DICT[lang] || DICT.zh;
+      const template = table[key] ?? DICT.zh[key] ?? key;
       if (!vars) return template;
       return template.replace(/\{(\w+)\}/g, (whole, name) => (vars[name] === undefined ? whole : String(vars[name])));
-    };
+    }
     //#endregion
 
     //#region 工具名 → 人话
@@ -114,6 +140,8 @@ window.__ModuleLoader__.load({
       create_goal: '建立目标',
       schedule_create: '排程'
     };
+    /** 本插件在宿主 locale 注册表里的命名空间。 */
+    const NS = 'tool-progress';
     const toolLabel = (name) => LABELS[name] || String(name || '工具调用');
     //#endregion
 
@@ -290,7 +318,7 @@ window.__ModuleLoader__.load({
     function buildModel(snapshot) {
       const nodes = nodeList(snapshot);
       // 每个分支都返回完整形状：少一个字段就会在渲染里读成 undefined.length。
-      if (nodes.length === 0) return { live: false, calls: [], running: [], current: null, turn: undefined, retries: 0, settled: 0 };
+      if (nodes.length === 0) return { live: false, calls: [], running: [], current: null, turn: undefined, retries: 0, settled: 0, turnOpen: false };
 
       let turnNumber;
       let turnRecord = null;
@@ -311,7 +339,11 @@ window.__ModuleLoader__.load({
         if (!node) continue;
         const turn = turnOf(node);
         const turnId = turn && typeof turn.turn === 'number' ? turn.turn : undefined;
-        if (turnId !== undefined && turnNumber !== undefined && turnId !== turnNumber) continue;
+        /* 只收当前回合的节点。
+           以前这里写的是 `turnId !== undefined && ...`，于是拿不到 turn 的节点会被无条件放行、
+           混进当前回合 —— 表现为旧回合的失败把"失败"字样带到了这次成功的调用上
+           （/tmp/wide.png 那次 isError=false，却被标成失败，就是这么来的）。 */
+        if (turnId === undefined || turnId !== turnNumber) continue;
         if (node.kind === 'assistant-step') {
           lastAssistant = node;
           continue;
@@ -336,9 +368,22 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const current = calls.length > 0 ? calls[calls.length - 1] : null;
+      /* 取"真正最后发生的那次调用"。渲染顺序不等于发生顺序：
+         合成节点、分组都可能让旧调用排在数组末尾。 */
+      const current = calls.length === 0
+        ? null
+        : calls.reduce((latest, call) => (
+            typeof call.anchorSeq === 'number' && (typeof latest.anchorSeq !== 'number' || call.anchorSeq > latest.anchorSeq)
+              ? call
+              : latest
+          ), calls[0]);
       const running = calls.filter((call) => call.endedAt === undefined);
       const startAt = turnRecord && turnRecord.start && typeof turnRecord.start.time === 'number' ? turnRecord.start.time : undefined;
+
+      /* 回合自己有没有结束 —— 这是"整体进行中"的唯一判据。
+         试点：turn/end 事件存在 ⇒ 回合结束；不存在 ⇒ 还在跑。
+         不设超时兜底：一直显示"进行中"，宁可慢一点收尾，也不猜"疑似停止"。 */
+      const turnOpen = closedAt === undefined;
 
       return {
         live: pending > 0,
@@ -350,6 +395,7 @@ window.__ModuleLoader__.load({
         turnRecord,
         closedAt,
         startAt,
+        turnOpen,
         settled: calls.filter((call) => call.endedAt !== undefined).length
       };
     }
@@ -408,7 +454,7 @@ window.__ModuleLoader__.load({
     /** 这次不到 3 秒也不提 —— 几秒钟的事不值得占用户注意力。 */
     const SLOW_MIN_CURRENT_MS = 3000;
 
-    function detectAnomalies(model, now) {
+    function detectAnomalies(model, now, lang) {
       const found = [];
       const calls = model.calls;
       if (calls.length === 0) return found;
@@ -418,7 +464,7 @@ window.__ModuleLoader__.load({
 
       // 1) 参数生成卡住
       if (current !== null && current.endedAt === undefined && current.phase === 'preparing' && currentDuration !== undefined && currentDuration >= STUCK_MS) {
-        found.push({ code: 'stuck', severity: 'info', text: t('generating') });
+        found.push({ code: 'stuck', severity: 'info', text: translate(lang, 'generating') });
       }
 
       // 2) 尾部连续同一目标
@@ -433,7 +479,7 @@ window.__ModuleLoader__.load({
           found.push({
             code: 'repeat',
             severity: 'warn',
-            text: t('repeatTarget', { n: repeats, tool: tail.label }),
+            text: translate(lang, 'repeatTarget', { n: repeats, tool: tail.label }),
             detail: tail.summary
           });
         }
@@ -446,7 +492,7 @@ window.__ModuleLoader__.load({
         failures += 1;
       }
       if (failures >= 2) {
-        found.push({ code: 'failures', severity: 'error', text: t('failures', { n: failures }) });
+        found.push({ code: 'failures', severity: 'error', text: translate(lang, 'failures', { n: failures }) });
       }
 
       // 4) 慢了：拿本回合同工具的历史中位数当基准
@@ -471,7 +517,7 @@ window.__ModuleLoader__.load({
           currentDuration > base * SLOW_RATIO
         ) {
           const ratio = Math.min(9, Math.max(2, Math.round(currentDuration / base)));
-          found.push({ code: 'slow', severity: 'warn', text: t('slow', { n: ratio }) });
+          found.push({ code: 'slow', severity: 'warn', text: translate(lang, 'slow', { n: ratio }) });
         }
       }
 
@@ -516,7 +562,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 出事时才展开的整块卡片。 */
-    function AlertCard({ state, headline, summary, time, anomalies, open, onToggle, children }) {
+    function AlertCard({ lang, state, headline, summary, time, anomalies, open, onToggle, children }) {
       const worst = anomalies.some((item) => item.severity === 'error') ? 'error' : 'warn';
       return h(
         'div',
@@ -536,7 +582,7 @@ window.__ModuleLoader__.load({
               'aria-expanded': open ? 'true' : 'false',
               onClick: onToggle
             },
-            open ? t('hide') : t('detail')
+            open ? translate(lang, 'hide') : translate(lang, 'detail')
           )
         ),
         h(
@@ -564,7 +610,7 @@ window.__ModuleLoader__.load({
      */
     const GANTT_MAX_ROWS = 8;
 
-    function Gantt({ calls, now, purpose }) {
+    function Gantt({ lang, calls, now, purpose }) {
       const withTime = calls.map((call, order) => ({ call, order, value: durationOf(call, now) ?? 0 }));
       const expensive = [...withTime]
         .sort((left, right) => right.value - left.value)
@@ -577,8 +623,8 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'dtp-gantt' },
-        purpose ? h('p', { className: 'dtp-why' }, h('b', null, t('why')), purpose) : null,
-        h('p', { className: 'dtp-gantt-cap' }, hidden > 0 ? t('ganttPartial', { n: hidden }) : t('gantt')),
+        purpose ? h('p', { className: 'dtp-why' }, h('b', null, translate(lang, 'why')), purpose) : null,
+        h('p', { className: 'dtp-gantt-cap' }, hidden > 0 ? translate(lang, 'ganttPartial', { n: hidden }) : translate(lang, 'gantt')),
         h(
           'div',
           { className: 'dtp-gantt-rows' },
@@ -611,6 +657,19 @@ window.__ModuleLoader__.load({
     function ToolProgressRow(props) {
       const useChat = typeof props.useChat === 'function' ? props.useChat : noopHook;
       const useSession = typeof props.useSession === 'function' ? props.useSession : noopHook;
+      /* 文案来源：
+         registration 声明了 locale 命名空间后，宿主会注入 t(face binds it)。
+         宿主的 t 知道当前语言，所以它优先；拿不到时退回自己的字典 + navigator。
+         这一步就是修 "界面中文却显示 Thinking/Done" 的根因。 */
+      const hostT = typeof props.t === 'function' ? props.t : null;
+      const lang = langOf(props.activeLocale) || langOf(props.localeId) || navigatorLang();
+      const tr = hostT
+        ? (key, vars) => {
+            const text = hostT(key, vars);
+            // 宿主的 t 在键缺失时会回显 key 本身；那种情况退回本地字典。
+            return typeof text === 'string' && text !== key ? text : translate(lang, key, vars);
+          }
+        : (key, vars) => translate(lang, key, vars);
 
       // 快照对象本身由 store 缓存，返回它而不是新对象，才符合 useSyncExternalStore 的约定。
       const snapshot = useChat((value) => value || null);
@@ -641,11 +700,11 @@ window.__ModuleLoader__.load({
 
       const anomalies = React.useMemo(() => {
         try {
-          return active ? detectAnomalies(model, now) : [];
+          return active ? detectAnomalies(model, now, lang) : [];
         } catch {
           return [];
         }
-      }, [model, now, active]);
+      }, [model, now, active, lang]);
 
       if (!model.calls.length && !sessionRunning) return null;
       if (!active && !sessionRunning && !recentlyClosed) return null;
@@ -657,21 +716,41 @@ window.__ModuleLoader__.load({
       const promoted = anomalies.length > 0 && signature !== dismissed;
       const expanded = open || promoted;
 
-      const state = active ? (current && current.isError ? 'error' : 'running') : current && current.isError ? 'error' : 'ok';
-      const elapsedMs = current === null ? undefined : durationOf(current, now);
-      const elapsed = elapsedMs === undefined ? '' : fmtDuration(elapsedMs);
-      const headFailed = model.calls.some((call) => call.isError);
-      const headline = current === null
-        ? t('thinking')
-        : active
-          ? (current.phase === 'preparing' ? `${t('preparing')} · ${current.label}` : current.label)
-          : current.interrupted
-            ? t('interrupted')
-            : headFailed
-              ? t('failed')
-              : t('done');
-      const summary = current !== null && current.summary ? current.summary : '';
-      const timeText = active || recentlyClosed ? elapsed : '';
+      /* 圆点与标题必须同源。
+         以前圆点看"最后一次调用"、标题扫"整个回合"，于是出现过"绿点 + 失败"。
+         现在统一以"回合状态"为主，调用级信息降为副标题。 */
+      const turnFailed = model.calls.some((call) => call.isError);
+      const turnOpen = model.turnOpen === true;
+
+      const state = turnOpen ? (turnFailed ? 'error' : 'running') : turnFailed ? 'error' : 'ok';
+
+      // 回合总用时：结束用 closedAt，进行中用 now
+      const turnElapsedMs = model.startAt === undefined
+        ? undefined
+        : (model.closedAt === undefined ? now : model.closedAt) - model.startAt;
+      const turnElapsed = turnElapsedMs === undefined ? '' : fmtDuration(turnElapsedMs);
+
+      /* 主标题：回合在干什么。
+         进行中 → "进行中 · 第 N 次调用"；结束 → "已完成 · N 次调用"；有失败 → "失败"。 */
+      const callCount = total === 0 ? 0 : total;
+      const headline = turnOpen
+        ? (callCount === 0
+            ? tr('turnRunningThinking')
+            : tr('turnRunning', { n: callCount }))
+        : turnFailed
+          ? tr('failed')
+          : tr('turnDone', { n: callCount });
+
+      /* 副标题：这次/上次调用具体在做什么。
+         失败时优先给原因，其次给"工具 · 目标"。 */
+      const failedCall = turnFailed ? [...model.calls].reverse().find((call) => call.isError) : null;
+      const summary = failedCall !== null && failedCall !== undefined
+        ? (failedCall.errorText || `${failedCall.label} ${failedCall.summary}`.trim())
+        : current !== null
+          ? `${current.label}${current.summary ? ` ${current.summary}` : ''}${current.endedAt === undefined ? '' : ` ${fmtDuration(durationOf(current, now) ?? 0)}`}`
+          : '';
+
+      const timeText = turnElapsed;
 
       const toggle = () => {
         // 自动弹开的告警，点一下的语义是"我知道了，收起来"，不是再展开一次。
@@ -687,8 +766,8 @@ window.__ModuleLoader__.load({
       if (total === 0) {
         return h(Pill, {
           state: 'running',
-          headline: t('thinking'),
-          summary: null,
+          headline: tr('turnRunningThinking'),
+          summary: tr('noCalls'),
           time: model.startAt === undefined ? '' : fmtDuration(now - model.startAt),
           hint: null,
           open: false,
@@ -698,6 +777,7 @@ window.__ModuleLoader__.load({
       }
 
       const detail = h(Gantt, {
+        lang,
         calls: model.calls,
         now,
         purpose: current !== null ? current.purpose : ''
@@ -706,11 +786,11 @@ window.__ModuleLoader__.load({
       const meta = h(
         'div',
         { className: 'dtp-meta' },
-        h('span', null, `${t('calls')} ${total}`),
-        model.running.length > 1 ? h('span', null, t('parallel', { n: model.running.length })) : null,
-        model.retries > 0 ? h('span', null, t('retries', { n: model.retries })) : null,
-        current !== null && current.subCalls > 0 ? h('span', null, t('subcalls', { n: current.subCalls })) : null,
-        done === total ? h('span', null, t('justDone')) : null
+        h('span', null, `${tr('calls')} ${total}`),
+        model.running.length > 1 ? h('span', null, tr('parallel', { n: model.running.length })) : null,
+        model.retries > 0 ? h('span', null, tr('retries', { n: model.retries })) : null,
+        current !== null && current.subCalls > 0 ? h('span', null, tr('subcalls', { n: current.subCalls })) : null,
+        turnOpen ? h('span', null, tr('turnStillRunning')) : null
       );
 
       if (promoted) {
@@ -720,6 +800,7 @@ window.__ModuleLoader__.load({
           h(
             AlertCard,
             {
+              lang,
               state,
               headline,
               summary,
@@ -742,11 +823,11 @@ window.__ModuleLoader__.load({
           summary,
           time: timeText,
           hint: anomalies.length > 0 ? anomalies[0] : null,
-          open,
+          open: expanded,
           onToggle: toggle,
           hasDetail: true
         }),
-        open ? h('div', { className: 'dtp-panel' }, meta, detail) : null
+        expanded ? h('div', { className: 'dtp-panel' }, meta, detail) : null
       );
     }
 
@@ -828,13 +909,35 @@ window.__ModuleLoader__.load({
         const slots = ctx.slots || (typeof ctx.get === 'function' ? ctx.get('slots') : undefined);
         if (!slots) return;
 
+        /* 把文案注册进宿主的 locale 表。
+           这一步不是为了"多语言好看"，是为了让宿主的 t 知道当前语言 ——
+           自己猜 navigator 会被 Electron 的 --lang=en-US 带偏。 */
+        const locale = typeof ctx.get === 'function' ? ctx.get('locale') : ctx.locale;
+        if (locale && typeof locale.register === 'function') {
+          const flat = (table) => {
+            const out = {};
+            for (const [key, value] of Object.entries(table)) {
+              if (typeof value === 'string') out[key] = value;
+            }
+            return out;
+          };
+          for (const id of ['zh', 'en']) {
+            ctx.effect(
+              () => locale.register(NS, id, flat(DICT[id])),
+              `dsh-tool-progress: 字典 ${id}`
+            );
+          }
+        }
+
         try {
           slots.inject('conversation.input.dock', () =>
             slots.register(
               {
                 name: 'conversation.input.dock',
                 id: 'tool-progress',
-                order: 15
+                order: 15,
+                // 声明命名空间后，宿主会注入感知当前语言的 t
+                locale: NS
               },
               ToolProgressRow
             )
