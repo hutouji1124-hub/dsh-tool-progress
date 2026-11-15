@@ -40,6 +40,10 @@ window.__ModuleLoader__.load({
         hide: '收起',
         calls: '调用',
         slow: '比同回合同工具平时久约 {n} 倍',
+        advice_stuck: '继续等，不是死机',
+        advice_repeat: '考虑打断，换个说法',
+        advice_failures: '查环境，改参数解决不了',
+        advice_slow: '看一眼是不是命令本身变重了',
         repeat: '连续 {n} 次调用同一目标，可能在原地打转',
         repeatTarget: '连续 {n} 次 {tool} 同一目标',
         failures: '连续 {n} 次失败',
@@ -71,6 +75,10 @@ window.__ModuleLoader__.load({
         hide: 'Less',
         calls: 'calls',
         slow: 'About {n}× slower than this tool usually takes in this turn',
+        advice_stuck: 'Keep waiting — this is not a hang',
+        advice_repeat: 'Consider interrupting and restating',
+        advice_failures: 'Check the environment, not the arguments',
+        advice_slow: 'Worth a look — the command itself may be heavier',
         repeat: '{n} calls in a row on the same target — possibly going in circles',
         repeatTarget: '{n} × {tool} on the same target',
         failures: '{n} consecutive failures',
@@ -464,7 +472,13 @@ window.__ModuleLoader__.load({
     /** 这次不到 3 秒也不提 —— 几秒钟的事不值得占用户注意力。 */
     const SLOW_MIN_CURRENT_MS = 3000;
 
-    function detectAnomalies(model, now, lang) {
+    /**
+     * @param live - 是否有调用正在跑。运行时的三条（卡住/打转/慢）只在 live 时判，
+     *   因为对一个已经收尾的回合说"可能在原地打转"没有意义；
+     *   但"连续失败"不一样——失败已经发生了，用户正要复盘，正是最该告诉他的时候。
+     *   （这条以前被一起挡在 live 后面，导致回合结束后连续失败完全不报。）
+     */
+    function detectAnomalies(model, now, lang, live) {
       const found = [];
       const calls = model.calls;
       if (calls.length === 0) return found;
@@ -472,9 +486,9 @@ window.__ModuleLoader__.load({
       const current = model.current;
       const currentDuration = current === null ? undefined : durationOf(current, now);
 
-      // 1) 参数生成卡住
-      if (current !== null && current.endedAt === undefined && current.phase === 'preparing' && currentDuration !== undefined && currentDuration >= STUCK_MS) {
-        found.push({ code: 'stuck', severity: 'info', text: translate(lang, 'generating') });
+      // 1) 参数生成卡住（只在运行时判）
+      if (live && current !== null && current.endedAt === undefined && current.phase === 'preparing' && currentDuration !== undefined && currentDuration >= STUCK_MS) {
+        found.push({ code: 'stuck', severity: 'info', text: translate(lang, 'generating'), advice: translate(lang, 'advice_stuck') });
       }
 
       // 2) 尾部连续同一目标
@@ -490,7 +504,8 @@ window.__ModuleLoader__.load({
             code: 'repeat',
             severity: 'warn',
             text: translate(lang, 'repeatTarget', { n: repeats, tool: tail.label }),
-            detail: tail.summary
+            detail: tail.summary,
+            advice: translate(lang, 'advice_repeat')
           });
         }
       }
@@ -502,10 +517,10 @@ window.__ModuleLoader__.load({
         failures += 1;
       }
       if (failures >= 2) {
-        found.push({ code: 'failures', severity: 'error', text: translate(lang, 'failures', { n: failures }) });
+        found.push({ code: 'failures', severity: 'error', text: translate(lang, 'failures', { n: failures }), advice: translate(lang, 'advice_failures') });
       }
 
-      // 4) 慢了：拿本回合同工具的历史中位数当基准
+      // 4) 慢了：拿本回合同工具的历史中位数当基准（只在运行时判）
       //
       // 基准必须够大才有意义。实测踩到的坑：一轮里前几次 bash 都是 20ms 的 ls，
       // 接着启动一次浏览器花了 10s —— 按纯中位数算就是"慢 175 倍"，
@@ -513,7 +528,7 @@ window.__ModuleLoader__.load({
       //   基准 < 1s 不判（亚秒级工具本来就忽快忽慢，比不出"反常"）
       //   本次 < 3s 不判（几秒钟的事不值得提醒）
       //   比值再离谱也只报到 9 倍，别拿 175 这种数字吓人
-      if (current !== null && current.endedAt === undefined && currentDuration !== undefined && current.name) {
+      if (live && current !== null && current.endedAt === undefined && currentDuration !== undefined && current.name) {
         const history = calls
           .filter((call) => call !== current && call.name === current.name && call.endedAt !== undefined)
           .map((call) => durationOf(call, now))
@@ -527,7 +542,7 @@ window.__ModuleLoader__.load({
           currentDuration > base * SLOW_RATIO
         ) {
           const ratio = Math.min(9, Math.max(2, Math.round(currentDuration / base)));
-          found.push({ code: 'slow', severity: 'warn', text: translate(lang, 'slow', { n: ratio }) });
+          found.push({ code: 'slow', severity: 'warn', text: translate(lang, 'slow', { n: ratio }), advice: translate(lang, 'advice_slow') });
         }
       }
 
@@ -603,6 +618,7 @@ window.__ModuleLoader__.load({
               'li',
               { key: item.code, className: 'dtp-reason', 'data-severity': item.severity },
               h('span', { className: 'dtp-reason-text' }, item.text),
+              item.advice ? h('span', { className: 'dtp-reason-advice' }, item.advice) : null,
               item.detail ? h('span', { className: 'dtp-reason-detail', title: item.detail }, item.detail) : null
             )
           )
@@ -710,7 +726,7 @@ window.__ModuleLoader__.load({
 
       const anomalies = React.useMemo(() => {
         try {
-          return active ? detectAnomalies(model, now, lang) : [];
+          return detectAnomalies(model, now, lang, active);
         } catch {
           return [];
         }
@@ -854,7 +870,7 @@ window.__ModuleLoader__.load({
 .dtp-pill[data-state="running"]{border-color:color-mix(in srgb,var(--dsw-alias-label-primary) 22%,transparent)}
 .dtp-pill[data-state="error"]{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
 .dtp-pill-title{color:var(--dsw-alias-label-primary);font-weight:600;flex:none}
-.dtp-pill-summary{color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:42ch;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.dtp-pill-summary{color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:28ch;flex:0 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .dtp-pill-time{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;flex:none}
 .dtp-pill-hint{flex:none;color:var(--dsw-alias-state-warn-primary);border-left:0.5px solid var(--dsw-alias-border-l2);padding-left:7px}
 .dtp-pill-hint[data-severity="error"]{color:var(--dsw-alias-state-error-primary)}
@@ -873,6 +889,7 @@ window.__ModuleLoader__.load({
 .dtp-reason[data-severity="error"]::before{background:var(--dsw-alias-state-error-primary)}
 .dtp-reason[data-severity="info"]::before{background:var(--dsw-alias-state-idle-primary)}
 .dtp-reason-text{color:var(--dsw-alias-label-primary);flex:none}
+.dtp-reason-advice{color:var(--dsw-alias-brand-primary);font-weight:600;flex:none;border-left:0.5px solid var(--dsw-alias-border-l2);padding-left:8px}
 .dtp-reason-detail{color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .dtp-alert-body{display:flex;flex-direction:column;gap:6px;border-top:0.5px solid var(--dsw-alias-border-l1);padding-top:6px;margin-top:2px}
 
@@ -884,15 +901,15 @@ window.__ModuleLoader__.load({
 .dtp-gantt{display:flex;flex-direction:column;gap:4px;min-width:0}
 .dtp-gantt-cap{margin:0;color:var(--dsw-alias-label-tertiary);font-size:11px}
 .dtp-gantt-rows{display:flex;flex-direction:column;gap:3px}
-.dtp-grow{display:grid;grid-template-columns:minmax(0,20em) minmax(0,1fr) auto;align-items:center;gap:10px;min-width:0}
-.dtp-grow-label{display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden}
+.dtp-grow{display:grid;grid-template-columns:16em minmax(60px,1fr) 3.6em;align-items:center;gap:10px;min-width:0}
+.dtp-grow-label{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden;line-height:1.35}
 .dtp-grow-what{color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
-.dtp-grow-tool{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px}
+.dtp-grow-tool{color:var(--dsw-alias-label-tertiary);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dtp-grow-track{position:relative;height:8px;border-radius:99px;background:color-mix(in srgb,var(--dsw-alias-label-primary) 8%,transparent);overflow:hidden;min-width:0}
 .dtp-grow-bar{display:block;height:100%;border-radius:99px;background:var(--dsw-alias-state-success-primary);transition:width .3s ease}
 .dtp-grow[data-state="running"] .dtp-grow-bar{background:var(--dsw-alias-label-primary);animation:dtp-breathe 1.4s ease-in-out infinite}
 .dtp-grow[data-state="error"] .dtp-grow-bar{background:var(--dsw-alias-state-error-primary)}
-.dtp-grow-time{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dtp-grow-time{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
 .dtp-grow-error{grid-column:2 / -1;color:var(--dsw-alias-state-error-primary);font-size:11px;white-space:normal;word-break:break-word}
 @keyframes dtp-breathe{0%,100%{opacity:.45}50%{opacity:1}}
 
