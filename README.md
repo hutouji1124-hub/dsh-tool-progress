@@ -3,6 +3,16 @@
 把对话里那行灰字「正在调用工具 · bash」换成一条能读懂的进度行：
 **在调哪个工具、为了什么、已经跑了多久、是不是不对劲、结束了哪一步最费时间。**
 
+![演示](docs/demo.gif)
+
+> 录制的是真实组件代码（同一份 `client.js`），数据用模拟快照驱动，方便在几秒内展示全部状态。
+
+**安装** → 看 [INSTALL.md](INSTALL.md)。需要先有 DeepSeek Harness。
+
+```
+● 进行中 · 第 4 次调用   终端命令 npm run build   49s   ▸
+```
+
 ## v2 的核心取舍：大部分时间应该安静
 
 v1 每回合都占着一整块 70px 卡片。问题不是信息不够，是**太吵**——用户 85% 的时间其实
@@ -91,7 +101,8 @@ tool-progress/
 ├── client.js          # 全部逻辑与样式
 ├── locale/{zh,en}.json
 ├── icon.svg
-└── docs/              # v2-pill / v2-in-context / v2-gantt
+├── INSTALL.md         # 安装步骤与排障
+└── docs/              # demo.gif / demo.webm / 三张状态截图
 ```
 
 ## 自检修掉的缺陷（留档）

@@ -271,11 +271,21 @@ window.__ModuleLoader__.load({
           .replace(/\s+/g, ' ')
           .trim();
         if (text === '') continue;
-        const tail = text.slice(Math.max(0, Math.floor(text.length * 0.6)));
-        const sentences = tail.split(/(?<=[。！？.!?])\s*/).map((part) => part.trim()).filter(Boolean);
-        const usable = sentences.filter((part) => part.length >= 16);
-        if (usable.length > 0) return clip(usable.reduce((best, part) => (part.length > best.length ? part : best)), 130);
-        return clip(tail, 130);
+        /* 按句末标点切句，然后从**句首**取一整句。
+           以前是先截取尾部 60% 再切 —— 会导致半句话收尾：
+           「，避免和宿主自己的 todo 冲突。」前面没有主语，读不出在说什么。
+           句首干净的一句才配当"目的"。 */
+        const sentences = text
+          .split(/(?<=[。！？.!?])\s*/)
+          .map((part) => part.trim())
+          .filter((part) => part !== '');
+        // 至少 12 个字，且不能以标点开头（那种是上一句的残余）
+        const usable = sentences.filter((part) => part.length >= 12 && !/^[，,、；;：:）)】》]/.test(part));
+        if (usable.length > 0) {
+          // 取最后一句完整的，而不是最长的 —— 最后的句子最接近「现在为什么这么做」
+          return clip(usable[usable.length - 1], 130);
+        }
+        return '';
       }
       return '';
     }

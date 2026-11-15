@@ -17,7 +17,13 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "docs/*.png"
+    "docs/*.png",
+    "docs/*.gif",
+    "docs/*.webm",
+    "INSTALL.md",
+    "PROMO.md",
+    "docs/demo.gif",
+    "docs/demo.webm"
   ],
   "dsh": {
     "bundle": {
